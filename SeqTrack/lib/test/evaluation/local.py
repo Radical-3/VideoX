@@ -24,5 +24,7 @@ def local_env_settings():
     settings.uav_path = ''
     settings.vot_path = ''
     settings.youtubevos_dir = ''
+    # 添加自定义数据集路径
+    settings.custom_path = r'd:\code\VideoX\SeqTrack\data\custom'
 
     return settings

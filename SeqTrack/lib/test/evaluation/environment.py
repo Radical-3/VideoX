@@ -20,10 +20,18 @@ class EnvSettings:
         self.trackingnet_path = ''
         self.davis_dir = ''
         self.youtubevos_dir = ''
+        self.custom_path = ''  # 添加自定义数据集路径属性
 
         self.got_packed_results_path = ''
         self.got_reports_path = ''
         self.tn_packed_results_path = ''
+
+
+    def __getattr__(self, name):
+        """当访问不存在的属性时，返回空字符串，避免属性错误"""
+        if name.startswith('__'):
+            raise AttributeError
+        return ''
 
 
 def create_default_local_file():
@@ -46,10 +54,13 @@ def create_default_local_file():
             attr_val = getattr(settings, attr)
             if not attr.startswith('__') and not callable(attr_val):
                 if comment_str is None:
-                    f.write('    settings.{} = \'{}\'\n'.format(attr, attr_val))
+                    f.write('    settings.{} = \'{}\''.format(attr, attr_val))
+                    if attr != dir(settings)[-1]:
+                        f.write('\n')
                 else:
-                    f.write('    settings.{} = \'{}\'    # {}\n'.format(attr, attr_val, comment_str))
-        f.write('\n    return settings\n\n')
+                    f.write('    settings.{} = \'{}\''.format(attr, attr_val))
+                    f.write('    # {}\n'.format(comment_str))
+        f.write('\n\n    return settings\n\n')
 
 
 class EnvSettings_ITP:
@@ -75,10 +86,18 @@ class EnvSettings_ITP:
         self.tnl2k_path = os.path.join(data_dir, 'tnl2k')
         self.davis_dir = ''
         self.youtubevos_dir = ''
+        self.custom_path = os.path.join(data_dir, 'custom')  # 添加自定义数据集路径
 
         self.got_packed_results_path = ''
         self.got_reports_path = ''
         self.tn_packed_results_path = ''
+
+
+    def __getattr__(self, name):
+        """当访问不存在的属性时，返回空字符串，避免属性错误"""
+        if name.startswith('__'):
+            raise AttributeError
+        return ''
 
 
 def create_default_local_file_ITP_test(workspace_dir, data_dir, save_dir):
@@ -101,10 +120,13 @@ def create_default_local_file_ITP_test(workspace_dir, data_dir, save_dir):
             attr_val = getattr(settings, attr)
             if not attr.startswith('__') and not callable(attr_val):
                 if comment_str is None:
-                    f.write('    settings.{} = \'{}\'\n'.format(attr, attr_val))
+                    f.write('    settings.{} = \'{}\''.format(attr, attr_val))
+                    if attr != dir(settings)[-1]:
+                        f.write('\n')
                 else:
-                    f.write('    settings.{} = \'{}\'    # {}\n'.format(attr, attr_val, comment_str))
-        f.write('\n    return settings\n\n')
+                    f.write('    settings.{} = \'{}\''.format(attr, attr_val))
+                    f.write('    # {}\n'.format(comment_str))
+        f.write('\n\n    return settings\n\n')
 
 
 def env_settings():
