@@ -8,15 +8,15 @@ def calculate_foreground_background_scores(score_map, bbox, crop_info=None, patc
     计算前景和背景区域的得分
     
     Args:
-        score_map: 得分图，形状为 [batch, channels, height, width] 或 [batch, channels, features] 或 NumPy 数组
+        score_map: 得分图，形状为 [batch, 4, bins] 对应SeqTrack的词空间格式
         bbox: 边界框坐标 (x, y, w, h)
         crop_info: 裁剪信息字典，包含 'crop_center' (cx, cy), 'crop_size' (裁剪大小), 'search_size' (调整后的大小)
         patch_size: 补丁大小
         search_size: 搜索区域大小
     
     Returns:
-        foreground_max: 前景区域的最大得分
-        background_max: 背景区域的最大得分
+        foreground_max: 正确边界框对应词空间的得分
+        background_max: 其他词空间的最大得分
     """
     # 调试：打印输入信息
     print(f"\n=== 调试得分损失计算 ===")
@@ -31,124 +31,191 @@ def calculate_foreground_background_scores(score_map, bbox, crop_info=None, patc
     # 处理不同格式的得分图
     print(f"得分图形状: {score_map.shape}, 维度数: {len(score_map.shape)}")
     
-    # 首先检查是否是特征向量格式
-    # 特征向量格式通常是 [batch, channels, features] 或 [channels, features]
-    if len(score_map.shape) == 3:
+    # 检查是否是SeqTrack的词空间格式 [batch, 4, bins]
+    if len(score_map.shape) == 3 and score_map.shape[1] == 4:
+        print("检测到SeqTrack词空间格式的得分图")
+        
+        # 确保边界框是相对于搜索区域的
+        if crop_info:
+            # 将原始图像坐标系的边界框转换为裁剪图像坐标系
+            crop_bbox = convert_bbox_to_crop_coords(
+                bbox, 
+                crop_info['crop_center'], 
+                crop_info['crop_size'], 
+                crop_info['search_size']
+            )
+            print(f"转换后的裁剪边界框: {crop_bbox}")
+        else:
+            # 如果没有裁剪信息，假设边界框已经是相对于裁剪图像的
+            crop_bbox = bbox
+            print(f"使用原始边界框作为裁剪边界框: {crop_bbox}")
+        
+        # 计算每个坐标维度的前景得分和背景得分
+        total_foreground = 0.0
+        total_background = 0.0
+        
+        # SeqTrack的词空间范围是0-1，映射到bins个bin
+        bins = score_map.shape[2]
+        print(f"词空间bin数量: {bins}")
+        
+        # SeqTrack使用中心坐标格式 (cx, cy, w, h)，而不是左上角坐标格式 (x, y, w, h)
+        # 将左上角坐标转换为中心坐标
+        x, y, w, h = crop_bbox
+        cx = x + w / 2
+        cy = y + h / 2
+        # 归一化到 [0, 1] 范围
+        cx_normalized = cx / search_size
+        cy_normalized = cy / search_size
+        w_normalized = w / search_size
+        h_normalized = h / search_size
+        # 确保在有效范围内
+        cx_normalized = max(0.0, min(1.0, cx_normalized))
+        cy_normalized = max(0.0, min(1.0, cy_normalized))
+        w_normalized = max(0.0, min(1.0, w_normalized))
+        h_normalized = max(0.0, min(1.0, h_normalized))
+        # 计算对应的bin索引
+        cx_bin = int(cx_normalized * (bins - 1))
+        cy_bin = int(cy_normalized * (bins - 1))
+        w_bin = int(w_normalized * (bins - 1))
+        h_bin = int(h_normalized * (bins - 1))
+        # 确保bin索引在有效范围内
+        cx_bin = max(0, min(bins - 1, cx_bin))
+        cy_bin = max(0, min(bins - 1, cy_bin))
+        w_bin = max(0, min(bins - 1, w_bin))
+        h_bin = max(0, min(bins - 1, h_bin))
+        
+        print(f"中心坐标 - cx: {cx}, cy: {cy}, w: {w}, h: {h}")
+        print(f"归一化中心坐标 - cx: {cx_normalized}, cy: {cy_normalized}, w: {w_normalized}, h: {h_normalized}")
+        print(f"对应的bin索引 - cx: {cx_bin}, cy: {cy_bin}, w: {w_bin}, h: {h_bin}")
+        
+        # 遍历4个坐标维度
+        bin_indices = [cx_bin, cy_bin, w_bin, h_bin]
+        for i in range(4):  # 4个坐标维度: cx, cy, w, h
+            # 提取当前维度的得分图
+            if is_numpy:
+                dim_scores = score_map[0, i, :]  # 假设batch_size=1
+                
+                # 找到得分最高的bin索引（模型预测的bin）
+                pred_bin_idx = np.argmax(dim_scores)
+                # 预测的坐标值
+                pred_value = (pred_bin_idx / (bins - 1)) * search_size
+                
+                # 真实边界框对应bin的索引
+                true_bin_idx = bin_indices[i]
+                # 前景得分：真实边界框对应bin的得分
+                foreground_score = dim_scores[true_bin_idx]
+                # 背景得分：其他所有bin的得分的最大值
+                # 创建掩码，排除当前bin
+                mask = np.ones_like(dim_scores)
+                mask[true_bin_idx] = 0
+                background_scores = dim_scores * mask
+                background_score = np.max(background_scores) if np.any(mask) else 0.0
+            else:
+                dim_scores = score_map[0, i, :]  # 假设batch_size=1
+                
+                # 找到得分最高的bin索引（模型预测的bin）
+                pred_bin_idx = dim_scores.argmax().item()
+                # 预测的坐标值
+                pred_value = (pred_bin_idx / (bins - 1)) * search_size
+                
+                # 真实边界框对应bin的索引
+                true_bin_idx = bin_indices[i]
+                # 前景得分：真实边界框对应bin的得分
+                foreground_score = dim_scores[true_bin_idx].item()
+                # 背景得分：其他所有bin的得分的最大值
+                # 创建掩码，排除当前bin
+                mask = torch.ones_like(dim_scores)
+                mask[true_bin_idx] = 0
+                background_scores = dim_scores * mask
+                background_score = background_scores.max().item() if mask.sum() > 0 else 0.0
+            
+            print(f"维度 {i} - 预测值: {pred_value}")
+            print(f"维度 {i} - 真实bin索引: {true_bin_idx}, 预测bin索引: {pred_bin_idx}")
+            print(f"维度 {i} - 真实bin得分: {foreground_score}, 其他bin最高得分: {background_score}")
+            
+            total_foreground += foreground_score
+            total_background += background_score
+        
+        # 计算平均前景得分和背景得分
+        foreground_max = total_foreground / 4.0
+        background_max = total_background / 4.0
+        
+        # 打印得分图的统计信息，帮助理解得分图的含义
+        if is_numpy:
+            all_scores = score_map.flatten()
+            print(f"得分图统计信息 - 最小值: {np.min(all_scores)}, 最大值: {np.max(all_scores)}, 平均值: {np.mean(all_scores)}")
+        else:
+            all_scores = score_map.view(-1)
+            print(f"得分图统计信息 - 最小值: {all_scores.min().item()}, 最大值: {all_scores.max().item()}, 平均值: {all_scores.mean().item()}")
+        
+        print(f"SeqTrack词空间格式 - 真实边界框对应得分: {foreground_max}, 其他词空间最高得分: {background_max}")
+        return foreground_max, background_max
+    
+    # 处理其他格式的得分图
+    elif len(score_map.shape) == 3:
         print(f"3维得分图 - 各维度大小: {score_map.shape}")
         # 检查最后一维是否大于1000
         if score_map.shape[2] > 1000:
             print("检测到特征向量格式的得分图")
-            # 对于特征向量格式，直接计算最大值
+            # 对于特征向量格式，将最大值作为前景得分，第二大值作为背景得分
             if is_numpy:
-                foreground_max = float(np.max(score_map))
-                background_max = float(np.min(score_map))  # 使用最小值作为背景得分
+                # 扁平化得分图
+                flattened_scores = score_map.flatten()
+                # 计算最大值和第二大值
+                if len(flattened_scores) > 1:
+                    sorted_scores = np.sort(flattened_scores)[::-1]
+                    foreground_max = float(sorted_scores[0])  # 当前最高得分
+                    background_max = float(sorted_scores[1])  # 其他区域的最高得分
+                else:
+                    foreground_max = float(np.max(score_map))
+                    background_max = 0.0
             else:
-                foreground_max = score_map.max().item()
-                background_max = score_map.min().item()
-            print(f"特征向量格式 - 前景最大: {foreground_max}, 背景最大: {background_max}")
+                # 扁平化得分图
+                flattened_scores = score_map.view(-1)
+                # 计算最大值和第二大值
+                if flattened_scores.numel() > 1:
+                    sorted_scores, _ = torch.sort(flattened_scores, descending=True)
+                    foreground_max = sorted_scores[0].item()  # 当前最高得分
+                    background_max = sorted_scores[1].item()  # 其他区域的最高得分
+                else:
+                    foreground_max = score_map.max().item()
+                    background_max = 0.0
+            print(f"特征向量格式 - 最高得分: {foreground_max}, 第二高得分: {background_max}")
             return foreground_max, background_max
         else:
             print(f"最后一维大小为 {score_map.shape[2]}，不认为是特征向量格式")
-            # 添加batch维度
-            if is_numpy:
-                score_map = np.expand_dims(score_map, axis=0)
-            else:
-                score_map = score_map.unsqueeze(0)
-            print(f"添加batch维度后的形状: {score_map.shape}")
-    # 特殊处理：如果是特征向量格式但维度不是3
+            return 0.0, 0.0
     elif len(score_map.shape) == 2:
         print("检测到2D特征向量格式的得分图")
         if is_numpy:
-            foreground_max = float(np.max(score_map))
-            background_max = float(np.min(score_map))
+            # 扁平化得分图
+            flattened_scores = score_map.flatten()
+            # 计算最大值和第二大值
+            if len(flattened_scores) > 1:
+                sorted_scores = np.sort(flattened_scores)[::-1]
+                foreground_max = float(sorted_scores[0])  # 当前最高得分
+                background_max = float(sorted_scores[1])  # 其他区域的最高得分
+            else:
+                foreground_max = float(np.max(score_map))
+                background_max = 0.0
         else:
-            foreground_max = score_map.max().item()
-            background_max = score_map.min().item()
-        print(f"2D特征向量格式 - 前景最大: {foreground_max}, 背景最大: {background_max}")
+            # 扁平化得分图
+            flattened_scores = score_map.view(-1)
+            # 计算最大值和第二大值
+            if flattened_scores.numel() > 1:
+                sorted_scores, _ = torch.sort(flattened_scores, descending=True)
+                foreground_max = sorted_scores[0].item()  # 当前最高得分
+                background_max = sorted_scores[1].item()  # 其他区域的最高得分
+            else:
+                foreground_max = score_map.max().item()
+                background_max = 0.0
+        print(f"2D特征向量格式 - 最高得分: {foreground_max}, 第二高得分: {background_max}")
         return foreground_max, background_max
-    elif len(score_map.shape) != 4:
-        # 如果维度不是4维，返回0
-        print(f"得分图维度不是4维，返回0")
+    else:
+        # 其他格式返回0
+        print(f"得分图格式不支持，返回0")
         return 0.0, 0.0
-    
-    # 以下是原始的空间得分图处理逻辑...
-    # 处理坐标转换
-    if crop_info:
-        # 将原始图像坐标系的边界框转换为裁剪图像坐标系
-        crop_bbox = convert_bbox_to_crop_coords(
-            bbox, 
-            crop_info['crop_center'], 
-            crop_info['crop_size'], 
-            crop_info['search_size']
-        )
-        print(f"转换后的裁剪边界框: {crop_bbox}")
-    else:
-        # 如果没有裁剪信息，假设边界框已经是相对于裁剪图像的
-        crop_bbox = bbox
-        print(f"使用原始边界框作为裁剪边界框: {crop_bbox}")
-    
-    # 计算前景区域的坐标
-    x, y, w, h = crop_bbox
-    x1, y1 = int(x), int(y)
-    x2, y2 = int(x + w), int(y + h)
-    
-    # 确保坐标在有效范围内
-    h_map, w_map = score_map.shape[2], score_map.shape[3]
-    x1 = max(0, x1)
-    y1 = max(0, y1)
-    x2 = min(w_map, x2)
-    y2 = min(h_map, y2)
-    
-    print(f"前景区域坐标: ({x1}, {y1}) - ({x2}, {y2})")
-    print(f"得分图尺寸: 高={h_map}, 宽={w_map}")
-    
-    # 检查前景区域是否有效
-    if x1 >= x2 or y1 >= y2:
-        print("前景区域无效，返回0")
-        return 0.0, 0.0
-    
-    # 提取前景区域的得分
-    foreground_score = score_map[:, :, y1:y2, x1:x2]
-    print(f"前景区域得分形状: {foreground_score.shape}")
-    
-    if foreground_score.size == 0:
-        print("前景区域得分大小为0，返回0")
-        return 0.0, 0.0
-    
-    # 计算前景区域的最大得分
-    if is_numpy:
-        foreground_max = float(np.max(foreground_score))
-    else:
-        foreground_max = foreground_score.max().item()
-    
-    print(f"前景区域最大得分: {foreground_max}")
-    
-    # 计算背景区域的得分
-    # 创建一个掩码，前景区域为0，背景区域为1
-    if is_numpy:
-        mask = np.ones_like(score_map)
-        mask[:, :, y1:y2, x1:x2] = 0
-    else:
-        mask = torch.ones_like(score_map)
-        mask[:, :, y1:y2, x1:x2] = 0
-    
-    # 提取背景区域的得分
-    background_score = score_map * mask
-    print(f"背景区域得分形状: {background_score.shape}")
-    
-    if background_score.size == 0:
-        print("背景区域得分大小为0，返回前景得分")
-        return foreground_max, 0.0
-    
-    # 计算背景区域的最大得分
-    if is_numpy:
-        background_max = float(np.max(background_score))
-    else:
-        background_max = background_score.max().item()
-    
-    print(f"背景区域最大得分: {background_max}")
-    
-    return foreground_max, background_max
+
 
 
 def convert_bbox_to_crop_coords(bbox, crop_center, crop_size, search_size):
@@ -204,12 +271,16 @@ class ScoreLoss(nn.Module):
             return 0.0
         
         # 计算前景和背景区域的最大得分
+        # 前景区域：正确边界框对应的区域
+        # 背景区域：其他所有区域
         foreground_max, background_max = calculate_foreground_background_scores(
             score_map, bbox, crop_info, self.patch_size, self.search_size
         )
         
         # 计算得分损失：前景最大得分 - 背景最大得分
-        # 目标是让这个值尽可能小，即前景得分低，背景得分高
+        # 目标是让这个值尽可能小，实现：
+        # 1. 前景得分低（正确边界框对应的得分降低）
+        # 2. 背景得分高（其他区域的得分最大值提高）
         loss = foreground_max - background_max
         print(f"计算得到的得分损失: {loss}")
         
