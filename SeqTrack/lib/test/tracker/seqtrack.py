@@ -72,11 +72,17 @@ class SEQTRACK(BaseTracker):
 
         # run the encoder
         with torch.no_grad():
-            xz = self.network.forward_encoder(images_list)
+            encoder_output = self.network.forward_encoder(images_list)
+            if len(encoder_output) == 2:
+                xz_list = [encoder_output[0]]
+                encoder_attn_weights = encoder_output[1]
+            else:
+                xz_list = encoder_output
+                encoder_attn_weights = None
 
         # run the decoder
         with torch.no_grad():
-            out_dict = self.network.inference_decoder(xz=xz,
+            out_dict = self.network.inference_decoder(xz=xz_list,
                                                       sequence=self.init_seq,
                                                       window=self.hanning,
                                                       seq_format=self.seq_format)
@@ -126,8 +132,34 @@ class SEQTRACK(BaseTracker):
         # 如果有得分图，也添加到返回结果中
         if 'score_maps' in out_dict:
             output['score_maps'] = out_dict['score_maps'].cpu().numpy()
+        
+        # 如果有编码器注意力权重，也添加到返回结果中
+        if encoder_attn_weights is not None:
+            output['encoder_attn_weights'] = [w.cpu().numpy() for w in encoder_attn_weights]
+        
+        # 如果有解码器交叉注意力权重，也添加到返回结果中
+        if 'cross_attn_weights' in out_dict:
+            output['cross_attn_weights'] = [[w.cpu().numpy() for w in layer_weights] for layer_weights in out_dict['cross_attn_weights']]
 
         return output
+    
+    def enable_attention_output(self):
+        """启用注意力权重输出"""
+        # 启用编码器注意力权重输出
+        if hasattr(self.network.encoder, 'enable_attention_output'):
+            self.network.encoder.enable_attention_output()
+        # 启用解码器注意力权重输出
+        if hasattr(self.network.decoder, 'enable_attention_output'):
+            self.network.decoder.enable_attention_output()
+    
+    def disable_attention_output(self):
+        """禁用注意力权重输出"""
+        # 禁用编码器注意力权重输出
+        if hasattr(self.network.encoder, 'disable_attention_output'):
+            self.network.encoder.disable_attention_output()
+        # 禁用解码器注意力权重输出
+        if hasattr(self.network.decoder, 'disable_attention_output'):
+            self.network.decoder.disable_attention_output()
 
     def map_box_back(self, pred_box: list, resize_factor: float):
         cx_prev, cy_prev = self.state[0] + 0.5 * self.state[2], self.state[1] + 0.5 * self.state[3]

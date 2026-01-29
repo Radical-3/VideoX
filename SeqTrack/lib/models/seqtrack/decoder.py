@@ -58,6 +58,7 @@ class SeqTrackDecoder(nn.Module):
 
         self.d_model = d_model
         self.nhead = nhead
+        self.return_attn = False
 
     def _reset_parameters(self):
         for p in self.parameters():
@@ -76,10 +77,14 @@ class SeqTrackDecoder(nn.Module):
 
         tgt_mask = generate_square_subsequent_mask(len(tgt)).to(tgt.device) #generate the causal mask
 
-        hs = self.body(tgt, memory, pos=pos_embed, query_pos=query_embed[:len(tgt)],
-                       tgt_mask=tgt_mask, memory_mask=None)
-
-        return hs.transpose(1, 2)
+        if self.return_attn and self.body.return_attn:
+            hs, cross_attn_weights = self.body(tgt, memory, pos=pos_embed, query_pos=query_embed[:len(tgt)],
+                                               tgt_mask=tgt_mask, memory_mask=None)
+            return hs.transpose(1, 2), cross_attn_weights
+        else:
+            hs = self.body(tgt, memory, pos=pos_embed, query_pos=query_embed[:len(tgt)],
+                           tgt_mask=tgt_mask, memory_mask=None)
+            return hs.transpose(1, 2)
 
 
     def inference(self, src, pos_embed, seq, vocab_embed,
@@ -89,6 +94,7 @@ class SeqTrackDecoder(nn.Module):
         memory = src
         confidence_list = []
         score_maps = []  # 存储得分图
+        cross_attn_weights_list = []  # 存储交叉注意力权重
         box_pos = [0, 1, 2, 3] # the position of bounding box
         center_pos = [0, 1]  # the position of x_center and y_center
         if seq_format == 'whxy':
@@ -100,7 +106,12 @@ class SeqTrackDecoder(nn.Module):
             query_embed = query_embed.repeat(1, bs, 1)
             tgt_mask = generate_square_subsequent_mask(len(tgt)).to(tgt.device)
 
-            hs = self.body(tgt, memory, pos=pos_embed[:len(memory)], query_pos=query_embed[:len(tgt)],
+            if self.return_attn and self.body.return_attn:
+                hs, cross_attn_weights = self.body(tgt, memory, pos=pos_embed[:len(memory)], query_pos=query_embed[:len(tgt)],
+                                                  tgt_mask=tgt_mask, memory_mask=None)
+                cross_attn_weights_list.append(cross_attn_weights)
+            else:
+                hs = self.body(tgt, memory, pos=pos_embed[:len(memory)], query_pos=query_embed[:len(tgt)],
                               tgt_mask=tgt_mask, memory_mask=None)
 
             # embedding --> likelihood
@@ -129,8 +140,26 @@ class SeqTrackDecoder(nn.Module):
         # 添加得分图到输出
         if score_maps:
             out_dict['score_maps'] = torch.stack(score_maps, dim=1) # [batch, 4, bins]
+        
+        # 添加交叉注意力权重到输出
+        if cross_attn_weights_list:
+            out_dict['cross_attn_weights'] = cross_attn_weights_list
 
         return out_dict
+    
+    def enable_attention_output(self):
+        """启用注意力权重输出"""
+        self.return_attn = True
+        self.body.return_attn = True
+        for layer in self.body.layers:
+            layer.return_attn = True
+    
+    def disable_attention_output(self):
+        """禁用注意力权重输出"""
+        self.return_attn = False
+        self.body.return_attn = False
+        for layer in self.body.layers:
+            layer.return_attn = False
 
 
 
@@ -156,6 +185,7 @@ class TransformerDecoder(nn.Module):
         self.num_layers = num_layers
         self.norm = norm
         self.return_intermediate = return_intermediate
+        self.return_attn = False
 
     def forward(self, tgt, memory,
                 tgt_mask: Optional[Tensor] = None,
@@ -165,15 +195,24 @@ class TransformerDecoder(nn.Module):
                 pos: Optional[Tensor] = None,
                 query_pos: Optional[Tensor] = None):
         output = tgt
+        cross_attn_weights_list = []
 
         intermediate = []
 
         for layer in self.layers:
-            output = layer(output, memory, tgt_mask=tgt_mask,
-                           memory_mask=memory_mask,
-                           tgt_key_padding_mask=tgt_key_padding_mask,
-                           memory_key_padding_mask=memory_key_padding_mask,
-                           pos=pos, query_pos=query_pos)
+            if self.return_attn and layer.return_attn:
+                output, cross_attn_weights = layer(output, memory, tgt_mask=tgt_mask,
+                                                   memory_mask=memory_mask,
+                                                   tgt_key_padding_mask=tgt_key_padding_mask,
+                                                   memory_key_padding_mask=memory_key_padding_mask,
+                                                   pos=pos, query_pos=query_pos)
+                cross_attn_weights_list.append(cross_attn_weights)
+            else:
+                output = layer(output, memory, tgt_mask=tgt_mask,
+                               memory_mask=memory_mask,
+                               tgt_key_padding_mask=tgt_key_padding_mask,
+                               memory_key_padding_mask=memory_key_padding_mask,
+                               pos=pos, query_pos=query_pos)
 
             if self.return_intermediate:
                 intermediate.append(self.norm(output))
@@ -185,8 +224,12 @@ class TransformerDecoder(nn.Module):
                 intermediate.append(output)
 
         if self.return_intermediate:
+            if self.return_attn:
+                return torch.stack(intermediate), cross_attn_weights_list
             return torch.stack(intermediate)
 
+        if self.return_attn:
+            return output.unsqueeze(0), cross_attn_weights_list
         return output.unsqueeze(0)
 
 
@@ -211,6 +254,7 @@ class TransformerDecoderLayer(nn.Module):
 
         self.activation = _get_activation_fn(activation)
         self.normalize_before = normalize_before
+        self.return_attn = False
 
     def with_pos_embed(self, tensor, pos: Optional[Tensor]):
         return tensor if pos is None else tensor + pos
@@ -227,18 +271,33 @@ class TransformerDecoderLayer(nn.Module):
                               key_padding_mask=tgt_key_padding_mask)[0]
         tgt = tgt + self.dropout1(tgt2)
         tgt = self.norm1(tgt)
-        tgt2 = self.multihead_attn(self.with_pos_embed(tgt, query_pos),
-                                   self.with_pos_embed(memory, pos),
-                                   memory, attn_mask=memory_mask,
-                                   key_padding_mask=memory_key_padding_mask)[0]
+        
+        if self.return_attn:
+            tgt2, cross_attn_weights = self.multihead_attn(
+                self.with_pos_embed(tgt, query_pos),
+                self.with_pos_embed(memory, pos),
+                memory, attn_mask=memory_mask,
+                key_padding_mask=memory_key_padding_mask
+            )
+            tgt = tgt + self.dropout2(tgt2)
+            tgt = self.norm2(tgt)
+            tgt2 = self.linear2(self.dropout(self.activation(self.linear1(tgt))))
+            tgt = tgt + self.dropout3(tgt2)
+            tgt = self.norm3(tgt)
+            return tgt, cross_attn_weights
+        else:
+            tgt2 = self.multihead_attn(self.with_pos_embed(tgt, query_pos),
+                                       self.with_pos_embed(memory, pos),
+                                       memory, attn_mask=memory_mask,
+                                       key_padding_mask=memory_key_padding_mask)[0]
 
-        tgt = tgt + self.dropout2(tgt2)
-        tgt = self.norm2(tgt)
-        tgt2 = self.linear2(self.dropout(self.activation(self.linear1(tgt))))
-        tgt = tgt + self.dropout3(tgt2)
-        tgt = self.norm3(tgt)
+            tgt = tgt + self.dropout2(tgt2)
+            tgt = self.norm2(tgt)
+            tgt2 = self.linear2(self.dropout(self.activation(self.linear1(tgt))))
+            tgt = tgt + self.dropout3(tgt2)
+            tgt = self.norm3(tgt)
 
-        return tgt
+            return tgt
 
     def forward_pre(self, tgt, memory,
                     tgt_mask: Optional[Tensor] = None,
@@ -253,15 +312,29 @@ class TransformerDecoderLayer(nn.Module):
                               key_padding_mask=tgt_key_padding_mask)[0]
         tgt = tgt + self.dropout1(tgt2)
         tgt2 = self.norm2(tgt)
-        tgt2 = self.multihead_attn(self.with_pos_embed(tgt2, query_pos),
-                                   self.with_pos_embed(memory, pos),
-                                   memory, attn_mask=memory_mask,
-                                   key_padding_mask=memory_key_padding_mask)[0]
-        tgt = tgt + self.dropout2(tgt2)
-        tgt2 = self.norm3(tgt)
-        tgt2 = self.linear2(self.dropout(self.activation(self.linear1(tgt2))))
-        tgt = tgt + self.dropout3(tgt2)
-        return tgt
+        
+        if self.return_attn:
+            tgt2, cross_attn_weights = self.multihead_attn(
+                self.with_pos_embed(tgt2, query_pos),
+                self.with_pos_embed(memory, pos),
+                memory, attn_mask=memory_mask,
+                key_padding_mask=memory_key_padding_mask
+            )
+            tgt = tgt + self.dropout2(tgt2)
+            tgt2 = self.norm3(tgt)
+            tgt2 = self.linear2(self.dropout(self.activation(self.linear1(tgt2))))
+            tgt = tgt + self.dropout3(tgt2)
+            return tgt, cross_attn_weights
+        else:
+            tgt2 = self.multihead_attn(self.with_pos_embed(tgt2, query_pos),
+                                       self.with_pos_embed(memory, pos),
+                                       memory, attn_mask=memory_mask,
+                                       key_padding_mask=memory_key_padding_mask)[0]
+            tgt = tgt + self.dropout2(tgt2)
+            tgt2 = self.norm3(tgt)
+            tgt2 = self.linear2(self.dropout(self.activation(self.linear1(tgt2))))
+            tgt = tgt + self.dropout3(tgt2)
+            return tgt
 
     def forward(self, tgt, memory,
                 tgt_mask: Optional[Tensor] = None,

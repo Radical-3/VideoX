@@ -125,6 +125,7 @@ class Attention(nn.Module):
         self.attn_drop = nn.Dropout(attn_drop)
         self.proj = nn.Linear(dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
+        self.return_attn = False
 
     def forward(self, x):
         B, N, C = x.shape
@@ -138,6 +139,9 @@ class Attention(nn.Module):
         x = (attn @ v).transpose(1, 2).reshape(B, N, C)
         x = self.proj(x)
         x = self.proj_drop(x)
+        
+        if self.return_attn:
+            return x, attn
         return x
 
 
@@ -154,11 +158,18 @@ class Block(nn.Module):
         self.norm2 = norm_layer(dim)
         mlp_hidden_dim = int(dim * mlp_ratio)
         self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
+        self.return_attn = False
 
     def forward(self, x):
-        x = x + self.drop_path(self.attn(self.norm1(x)))
-        x = x + self.drop_path(self.mlp(self.norm2(x)))
-        return x
+        if self.return_attn and self.attn.return_attn:
+            attn_out, attn_weights = self.attn(self.norm1(x))
+            x = x + self.drop_path(attn_out)
+            x = x + self.drop_path(self.mlp(self.norm2(x)))
+            return x, attn_weights
+        else:
+            x = x + self.drop_path(self.attn(self.norm1(x)))
+            x = x + self.drop_path(self.mlp(self.norm2(x)))
+            return x
 
 
 class PatchEmbed(nn.Module):
@@ -234,6 +245,7 @@ class VisionTransformer(nn.Module):
         self.embed_dim_list = [embed_dim]
         self.num_search = search_number
         self.num_template = template_number
+        self.return_attn = False
 
         if hybrid_backbone is not None:
             self.patch_embed = HybridEmbed(
@@ -303,20 +315,50 @@ class VisionTransformer(nn.Module):
         xz_feat = torch.cat([x_feat, z_feat], dim=1)
 
         xz = self.pos_drop(xz_feat)
+        attn_weights_list = []
 
         for blk in self.blocks:   #batch is the first dimension.
-            if self.use_checkpoint:
-                xz = checkpoint.checkpoint(blk, xz)
+            if self.return_attn:
+                if self.use_checkpoint:
+                    # 注意：checkpoint不支持返回多个值，这里简化处理
+                    xz = blk(xz)
+                else:
+                    xz, attn_weights = blk(xz)
+                    attn_weights_list.append(attn_weights)
             else:
-                xz = blk(xz)
+                if self.use_checkpoint:
+                    xz = checkpoint.checkpoint(blk, xz)
+                else:
+                    xz = blk(xz)
 
         xz = self.norm(xz) # B,N,C
+        
+        if self.return_attn:
+            return xz, attn_weights_list
         return xz
 
     def forward(self, images_list):
-        xz = self.forward_features(images_list)
-        out=[xz]
+        if self.return_attn:
+            xz, attn_weights = self.forward_features(images_list)
+            out = [xz, attn_weights]
+        else:
+            xz = self.forward_features(images_list)
+            out = [xz]
         return out
+    
+    def enable_attention_output(self):
+        """启用注意力权重输出"""
+        self.return_attn = True
+        for blk in self.blocks:
+            blk.return_attn = True
+            blk.attn.return_attn = True
+    
+    def disable_attention_output(self):
+        """禁用注意力权重输出"""
+        self.return_attn = False
+        for blk in self.blocks:
+            blk.return_attn = False
+            blk.attn.return_attn = False
 
 
 def _conv_filter(state_dict, patch_size=16):
