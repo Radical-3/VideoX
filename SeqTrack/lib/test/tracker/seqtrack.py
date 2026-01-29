@@ -114,7 +114,20 @@ class SEQTRACK(BaseTracker):
             cv2.imshow('vis', image_BGR)
             cv2.waitKey(1)
 
-        return {"target_bbox": self.state}
+        # 构建返回结果，包含更多信息以便对抗攻击研究
+        output = {
+            'target_bbox': self.state,
+            'confidence': out_dict['confidence'].cpu().numpy(),
+            'pred_boxes': pred_boxes.cpu().numpy(),
+            'search_patch': x_patch_arr,
+            'resize_factor': resize_factor
+        }
+
+        # 如果有得分图，也添加到返回结果中
+        if 'score_maps' in out_dict:
+            output['score_maps'] = out_dict['score_maps'].cpu().numpy()
+
+        return output
 
     def map_box_back(self, pred_box: list, resize_factor: float):
         cx_prev, cy_prev = self.state[0] + 0.5 * self.state[2], self.state[1] + 0.5 * self.state[3]

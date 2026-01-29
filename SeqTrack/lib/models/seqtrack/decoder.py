@@ -88,6 +88,7 @@ class SeqTrackDecoder(nn.Module):
         n, bs, c = src.shape
         memory = src
         confidence_list = []
+        score_maps = []  # 存储得分图
         box_pos = [0, 1, 2, 3] # the position of bounding box
         center_pos = [0, 1]  # the position of x_center and y_center
         if seq_format == 'whxy':
@@ -106,6 +107,11 @@ class SeqTrackDecoder(nn.Module):
             out = vocab_embed(hs.transpose(1, 2)[-1, :, -1, :])
             out = out.softmax(-1)
 
+            # 保存得分图
+            if i in box_pos:
+                score_map = out[:, :self.bins]  # 只包含坐标值的置信度
+                score_maps.append(score_map)
+
             if i in box_pos:
                 out = out[:, :self.bins] # only include the coordinate values' confidence
 
@@ -119,8 +125,13 @@ class SeqTrackDecoder(nn.Module):
         out_dict = {}
         out_dict['pred_boxes'] = seq[:, -self.num_coordinates:] # Discard the START token, only get the bounding box
         out_dict['confidence'] = torch.cat(confidence_list, dim=-1)[:, :]
+        
+        # 添加得分图到输出
+        if score_maps:
+            out_dict['score_maps'] = torch.stack(score_maps, dim=1) # [batch, 4, bins]
 
         return out_dict
+
 
 
 
@@ -135,6 +146,7 @@ def generate_square_subsequent_mask(sz):
     mask = mask.float().masked_fill(mask == 0, float(
         '-inf')).masked_fill(mask == 1, float(0.0))
     return mask
+
 
 class TransformerDecoder(nn.Module):
 
