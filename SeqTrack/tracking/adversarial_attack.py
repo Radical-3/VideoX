@@ -10,6 +10,7 @@ from lib.test.evaluation import get_dataset
 from lib.test.tracker.seqtrack import SEQTRACK
 from lib.test.parameter.seqtrack import parameters
 from lib.test.loss.attention_loss import AttentionLoss
+from lib.test.loss.score_loss import ScoreLoss
 
 
 class AdversarialAttack:
@@ -25,6 +26,8 @@ class AdversarialAttack:
         self.tracker.enable_attention_output()
         # 创建注意力损失函数
         self.attention_loss = AttentionLoss(patch_size=16, search_size=256)
+        # 创建得分损失函数
+        self.score_loss = ScoreLoss(patch_size=16, search_size=256)
     
     def calculate_iou_loss(self, pred_bbox, gt_bbox):
         """计算IoU损失
@@ -83,14 +86,54 @@ class AdversarialAttack:
             return 0.0
         
         # 计算注意力损失
-        loss = self.attention_loss(
-            encoder_attn_weights=encoder_attn_weights,
-            cross_attn_weights=cross_attn_weights,
+        from lib.test.loss.attention_loss import AttentionLoss
+        attention_loss = AttentionLoss(patch_size=16, search_size=256)
+        # 合并编码器和解码器的注意力权重
+        attention_weights = {}
+        if encoder_attn_weights:
+            # 将编码器注意力权重列表转换为字典
+            for i, weights in enumerate(encoder_attn_weights):
+                attention_weights[f'encoder_layer_{i}'] = weights
+        if cross_attn_weights:
+            # 将解码器注意力权重列表转换为字典
+            for i, layer_weights in enumerate(cross_attn_weights):
+                attention_weights[f'decoder_layer_{i}'] = layer_weights
+        loss = attention_loss(
+            attention_weights=attention_weights,
             bbox=gt_bbox,
             crop_info=crop_info
         )
         
         return loss.item()
+    
+    def calculate_score_loss(self, score_map, gt_bbox, crop_info=None):
+        """计算得分损失
+        
+        args:
+            score_map: 得分图，形状为 [batch, channels, height, width]
+            gt_bbox: 真实边界框 [x, y, w, h]
+            crop_info: 裁剪信息字典，包含 'crop_center' (cx, cy), 'crop_size' (裁剪大小), 'search_size' (调整后的大小)
+        
+        returns:
+            float: 得分损失值
+        """
+        if score_map is None:
+            print("得分图为None，返回0")
+            return 0.0
+        
+        # 调试：打印得分图的基本信息
+        print(f"得分图形状: {score_map.shape}, 类型: {type(score_map)}")
+        print(f"得分图最小值: {score_map.min()}, 最大值: {score_map.max()}, 平均值: {score_map.mean()}")
+        
+        # 计算得分损失
+        loss = self.score_loss(
+            score_map=score_map,
+            bbox=gt_bbox,
+            crop_info=crop_info
+        )
+        
+        print(f"计算得到的得分损失: {loss}")
+        return loss
     
     def load_frame(self, frame_path):
         """加载帧数据
@@ -195,9 +238,19 @@ class AdversarialAttack:
                     'search_size': search_size
                 }
                 
+                # 提取得分图
+                score_map = output.get('score_maps', None)
+                
+                # 调试：打印得分图信息
+                if score_map is not None:
+                    print(f"得分图形状: {score_map.shape}, 类型: {type(score_map)}")
+                else:
+                    print("得分图为None")
+                
                 # 计算损失函数
                 iou_loss = self.calculate_iou_loss(pred_bbox, gt_bbox)
                 attention_loss = self.calculate_attention_loss(encoder_attn_weights, cross_attn_weights, gt_bbox, crop_info)
+                score_loss = self.calculate_score_loss(score_map, gt_bbox, crop_info)
                 
                 # 打印结果
                 print(f"\n=== 帧 {frame_idx} ===")
@@ -205,6 +258,7 @@ class AdversarialAttack:
                 print(f"真实边界框: {gt_bbox}")
                 print(f"IoU损失: {iou_loss:.4f}")
                 print(f"注意力损失: {attention_loss:.4f}")
+                print(f"得分损失: {score_loss:.4f}")
                 print(f"裁剪中心: {crop_info['crop_center']}")
                 print(f"裁剪大小: {crop_info['crop_size']:.2f}")
                 
