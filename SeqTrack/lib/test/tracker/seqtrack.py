@@ -73,10 +73,12 @@ class SEQTRACK(BaseTracker):
         # run the encoder
         with torch.no_grad():
             encoder_output = self.network.forward_encoder(images_list)
-            if len(encoder_output) == 2:
+            if isinstance(encoder_output, list) and len(encoder_output) == 2:
+                # 当启用注意力输出时，encoder_output格式为 [xz, attn_weights]
                 xz_list = [encoder_output[0]]
                 encoder_attn_weights = encoder_output[1]
             else:
+                # 当未启用注意力输出时，encoder_output格式为 [xz]
                 xz_list = encoder_output
                 encoder_attn_weights = None
 
@@ -146,8 +148,8 @@ class SEQTRACK(BaseTracker):
     def enable_attention_output(self):
         """启用注意力权重输出"""
         # 启用编码器注意力权重输出
-        if hasattr(self.network.encoder, 'enable_attention_output'):
-            self.network.encoder.enable_attention_output()
+        if hasattr(self.network.encoder, 'body') and hasattr(self.network.encoder.body, 'enable_attention_output'):
+            self.network.encoder.body.enable_attention_output()
         # 启用解码器注意力权重输出
         if hasattr(self.network.decoder, 'enable_attention_output'):
             self.network.decoder.enable_attention_output()
@@ -155,8 +157,8 @@ class SEQTRACK(BaseTracker):
     def disable_attention_output(self):
         """禁用注意力权重输出"""
         # 禁用编码器注意力权重输出
-        if hasattr(self.network.encoder, 'disable_attention_output'):
-            self.network.encoder.disable_attention_output()
+        if hasattr(self.network.encoder, 'body') and hasattr(self.network.encoder.body, 'disable_attention_output'):
+            self.network.encoder.body.disable_attention_output()
         # 禁用解码器注意力权重输出
         if hasattr(self.network.decoder, 'disable_attention_output'):
             self.network.decoder.disable_attention_output()
