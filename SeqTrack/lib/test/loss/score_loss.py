@@ -59,32 +59,44 @@ def calculate_foreground_background_scores(score_map, bbox, crop_info=None, patc
         print(f"词空间bin数量: {bins}")
         
         # SeqTrack使用中心坐标格式 (cx, cy, w, h)，而不是左上角坐标格式 (x, y, w, h)
-        # 将左上角坐标转换为中心坐标
+        # 严格按照SeqTrack的训练代码实现映射逻辑
         x, y, w, h = crop_bbox
-        cx = x + w / 2
-        cy = y + h / 2
+        
+        # 转换为x0y0x1y1格式
+        x1 = x + w
+        y1 = y + h
+        
         # 归一化到 [0, 1] 范围
-        cx_normalized = cx / search_size
-        cy_normalized = cy / search_size
-        w_normalized = w / search_size
-        h_normalized = h / search_size
+        x_normalized = x / search_size
+        y_normalized = y / search_size
+        x1_normalized = x1 / search_size
+        y1_normalized = y1 / search_size
+        
         # 确保在有效范围内
-        cx_normalized = max(0.0, min(1.0, cx_normalized))
-        cy_normalized = max(0.0, min(1.0, cy_normalized))
-        w_normalized = max(0.0, min(1.0, w_normalized))
-        h_normalized = max(0.0, min(1.0, h_normalized))
-        # 计算对应的bin索引
+        x_normalized = max(0.0, min(1.0, x_normalized))
+        y_normalized = max(0.0, min(1.0, y_normalized))
+        x1_normalized = max(0.0, min(1.0, x1_normalized))
+        y1_normalized = max(0.0, min(1.0, y1_normalized))
+        
+        # 转换为cxcywh格式
+        cx_normalized = (x_normalized + x1_normalized) / 2
+        cy_normalized = (y_normalized + y1_normalized) / 2
+        w_normalized = x1_normalized - x_normalized
+        h_normalized = y1_normalized - y_normalized
+        
+        # 计算对应的bin索引，严格按照SeqTrack的训练代码：乘以(bins-1)，然后取整
         cx_bin = int(cx_normalized * (bins - 1))
         cy_bin = int(cy_normalized * (bins - 1))
         w_bin = int(w_normalized * (bins - 1))
         h_bin = int(h_normalized * (bins - 1))
+        
         # 确保bin索引在有效范围内
         cx_bin = max(0, min(bins - 1, cx_bin))
         cy_bin = max(0, min(bins - 1, cy_bin))
         w_bin = max(0, min(bins - 1, w_bin))
         h_bin = max(0, min(bins - 1, h_bin))
         
-        print(f"中心坐标 - cx: {cx}, cy: {cy}, w: {w}, h: {h}")
+        print(f"中心坐标 - cx: {x + w/2}, cy: {y + h/2}, w: {w}, h: {h}")
         print(f"归一化中心坐标 - cx: {cx_normalized}, cy: {cy_normalized}, w: {w_normalized}, h: {h_normalized}")
         print(f"对应的bin索引 - cx: {cx_bin}, cy: {cy_bin}, w: {w_bin}, h: {h_bin}")
         

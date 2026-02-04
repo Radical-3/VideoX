@@ -279,8 +279,34 @@ class Tracker:
 
     def _read_image(self, image_file: str):
         if isinstance(image_file, str):
-            im = cv.imread(image_file)
-            return cv.cvtColor(im, cv.COLOR_BGR2RGB)
+            # 检查是否为npy格式文件
+            if image_file.endswith('.npy'):
+                # 加载npy文件
+                data = np.load(image_file, allow_pickle=True)
+                # 检查data的类型
+                if isinstance(data, dict):
+                    # 如果直接是字典
+                    if 'image' in data:
+                        return data['image']  # 直接使用npy中的RGB图像
+                elif data.ndim == 0:
+                    # 如果是0维数组，尝试转换为Python对象
+                    data = data.item()
+                    if isinstance(data, dict) and 'image' in data:
+                        return data['image']
+                elif data.shape == (1,):
+                    # 如果是形状为(1,)的数组，取第一个元素
+                    data = data[0]
+                    if isinstance(data, dict) and 'image' in data:
+                        return data['image']
+                elif data.shape == (6,):
+                    # 形状为(6,)的数组，顺序: identifier, image, image_mask, label, camera_position, relative_remove
+                    return data[1]  # 直接使用第二个元素作为图像
+                # 如果无法加载，抛出异常
+                raise ValueError(f"Cannot load image from npy file: {image_file}")
+            else:
+                # 普通图像文件
+                im = cv.imread(image_file)
+                return cv.cvtColor(im, cv.COLOR_BGR2RGB)
         elif isinstance(image_file, list) and len(image_file) == 2:
             return decode_img(image_file[0], image_file[1])
         else:
